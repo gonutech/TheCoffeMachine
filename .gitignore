@@ -1,0 +1,10 @@
+# Ignore Build output
+TheCoffeMachine/MDK-ARM/TheCoffeMachine/
+TheCoffeMachine/MDK-ARM/TheCoffeMachine/*
+TheCoffeMachine/MDK-ARM/DebugConfig/
+TheCoffeMachine/MDK-ARM/DebugConfig/*
+TheCoffeMachine/MDK-ARM/RTE/
+TheCoffeMachine/MDK-ARM/RTE/*
+
+TheCoffeMachine/MDK-ARM/TheCoffeMachine.uvguix.Julia-Nga
+*.lst
