@@ -77,8 +77,11 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
-tUI32 volumeAdcValue_gdu32 = 0;
+tUI32 volumeAdcValue_gdu32               = 0;
+tUI8  volumeAdcStartupCounter            = 0;
+tUI8  volumeAdcStartupErrorStatus_gdu8 = 0;
 
+tUI32 motorPwmDutySet_gdu32 = 0;
 /* USER CODE END Variables */
 osThreadId defaultTaskHandle;
 osThreadId motorCtrlTaskHandle;
@@ -87,7 +90,7 @@ osThreadId volumeReadTaskHandle;
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
-   
+void startupErrorHandler(void);
 /* USER CODE END FunctionPrototypes */
 
 void StartDefaultTask(void const * argument);
@@ -156,10 +159,16 @@ void StartDefaultTask(void const * argument)
 {
 
   /* USER CODE BEGIN StartDefaultTask */
+  TickType_t xNextWakeTime;
+  const TickType_t xFrequency = 100u; // 100ms
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    // Only active once the error detected at starting up
+    if (9 == volumeAdcStartupErrorStatus_gdu8) {
+      HAL_GPIO_TogglePin(LED_DISP_GPIO_Port, LED_DISP_Pin);
+    }
+    vTaskDelayUntil(&xNextWakeTime, xFrequency);
   }
   /* USER CODE END StartDefaultTask */
 }
@@ -170,7 +179,6 @@ void StartDefaultTask(void const * argument)
 * @param argument: Not used
 * @retval None
 */
-tUI32 duty_set = 0;
 /* USER CODE END Header_startMotorCtrlTask */
 void startMotorCtrlTask(void const * argument)
 {
@@ -184,11 +192,18 @@ void startMotorCtrlTask(void const * argument)
   /* Infinite loop */
   for(;;)
   {
-    duty_set = (volumeAdcValue_gdu32 * 500) / 4096;
-    motorI_SetPwmOutput((tUI16)duty_set);
-    //vTaskDelay(10);
+    // Check for error
+    if (9 == volumeAdcStartupErrorStatus_gdu8) break;
+    else if (0 == volumeAdcStartupErrorStatus_gdu8) { /* Start up check, waiting for valid */ }
+    else {
+      // Calculate duty according to adc value read
+      motorPwmDutySet_gdu32 = (volumeAdcValue_gdu32 * 500) / 4096;
+      // Direct motor export
+      motorI_SetPwmOutput((tUI16)motorPwmDutySet_gdu32);
+    }
     vTaskDelayUntil(&xNextWakeTime, xFrequency);
   }
+  startupErrorHandler();
   /* USER CODE END startMotorCtrlTask */
 }
 
@@ -207,35 +222,41 @@ void startLedDispTask(void const * argument)
   
   GPIO_PinState pin_status = GPIO_PIN_SET;
   tUI16 led_disp_counter = 0;
-  tUI8  led_on_max_count = duty_set / 5;
+  tUI8  led_on_max_count = motorPwmDutySet_gdu32 / 5;
   tUI8  led_on_counter   = 0;
   /* Infinite loop */
   for(;;)
   {
-    // Pin state handle update every 0.5s
-    if (led_disp_counter++ >= 100) {
-      led_disp_counter = 0;
-      // Update duty recalcualte display
-      led_on_max_count = duty_set / 5;
-    } else {
-      // Keep duty and display
-      led_on_counter++;
-      if (led_on_counter >= (led_disp_counter)) {
-        led_on_counter = 0;
+    // Check for error
+    if (9 == volumeAdcStartupErrorStatus_gdu8) break;
+    else if (0 == volumeAdcStartupErrorStatus_gdu8) { /* Start up check, waiting for valid */ }
+    else {
+      // Pin state handle update every 0.5s
+      if (led_disp_counter++ >= 100) {
+        led_disp_counter = 0;
+        // Update duty recalcualte display
+        led_on_max_count = motorPwmDutySet_gdu32 / 5;
+      } else {
+        // Keep duty and display
+        led_on_counter++;
+        if (led_on_counter >= (led_disp_counter)) {
+          led_on_counter = 0;
+        }
+        else if (led_on_counter >= led_on_max_count) {
+          // Off led -> positive low
+          pin_status = GPIO_PIN_SET;
+        }
+        else {
+          // On led  -> positive low
+          pin_status = GPIO_PIN_RESET;
+        }
       }
-      else if (led_on_counter >= led_on_max_count) {
-        // Off led -> positive low
-        pin_status = GPIO_PIN_SET;
-      }
-      else {
-        // On led  -> positive low
-        pin_status = GPIO_PIN_RESET;
-      }
+      // Export led state handle
+      HAL_GPIO_WritePin(LED_DISP_GPIO_Port, LED_DISP_Pin, pin_status);
     }
-    
-    HAL_GPIO_WritePin(LED_DISP_GPIO_Port, LED_DISP_Pin, pin_status);
     vTaskDelayUntil(&xNextWakeTime, xFrequency);
   }
+  startupErrorHandler();
   /* USER CODE END startLedDispTask */
 }
 
@@ -260,18 +281,46 @@ void startVolumeReadTask(void const * argument)
   {
     // Start ADC Conversion
     HAL_ADC_Start_IT(&hadc1);
+    // Check for error start up
+    if (9 == volumeAdcStartupErrorStatus_gdu8) {
+      // No longer request adc conversion
+      HAL_ADC_Stop_IT(&hadc1);
+      break;
+    }
 
     vTaskDelayUntil(&xNextWakeTime, xFrequency);
   }
+  startupErrorHandler();
   /* USER CODE END startVolumeReadTask */
 }
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
-void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
-{
-    // Read & Update The ADC Result
-    volumeAdcValue_gdu32 = HAL_ADC_GetValue(&hadc1);
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc) {
+  static tUI32 sumupAdcRaw = 0;
+  // Read & Update The ADC Result
+  volumeAdcValue_gdu32 = HAL_ADC_GetValue(&hadc1);
+  // Checking first 5 cycle
+  if (volumeAdcStartupCounter < 5) {
+    volumeAdcStartupCounter++;
+    sumupAdcRaw += volumeAdcValue_gdu32;
+    // Checking each sample, 100% equal to 4096, let the valid data lower than 50%
+    // In first five cycles, each sampling data should not greater than 2000
+    // Valid some noise, and first five sum up  should not greater than 2000x5 = 10000
+    if (sumupAdcRaw >= 10000) volumeAdcStartupErrorStatus_gdu8 = 9;
+    else volumeAdcStartupErrorStatus_gdu8 = 0;
+    
+  } else if ((volumeAdcStartupCounter >= 5) && (0 == volumeAdcStartupErrorStatus_gdu8)) {
+    /* Valid first 5 sample -> start normal control */
+    volumeAdcStartupErrorStatus_gdu8 = 1;
+  } else { /* Do no thing */ }
+}
+
+void startupErrorHandler (void) {
+  while (1) { 
+    /* Infinite loop n do nothing but need release resource */
+    osDelay(1000);
+  }
 }
 /* USER CODE END Application */
 
